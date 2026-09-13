@@ -69,7 +69,7 @@
     letter-spacing:0.04em;
   }
   .readouts{
-    display:grid; grid-template-columns:1.3fr 1fr 1fr;
+    display:grid; grid-template-columns:1fr 1fr;
     gap:1px; background:var(--panel-border);
     margin-top:14px; border:1px solid var(--panel-border); border-radius:4px;
     overflow:hidden;
@@ -78,6 +78,7 @@
   .cell .label{ font-size:10px; color:var(--text-dim); letter-spacing:0.03em; margin-bottom:6px;}
   .cell .value{ font-family:var(--mono); font-size:26px; line-height:1; color:var(--trace); }
   .cell .value small{ font-size:13px; color:var(--text-dim); margin-left:4px; }
+  .cell.spo2 .value{ color:var(--amber); }
   .cell.quality .dots{ display:flex; gap:4px; margin-top:2px; }
   .dot{ width:9px; height:9px; border-radius:50%; background:var(--panel-border); }
   .dot.on{ background:var(--trace); }
@@ -148,6 +149,10 @@
         <div class="label">估計心率</div>
         <div class="value" id="bpmValue">— <small>bpm</small></div>
       </div>
+      <div class="cell spo2">
+        <div class="label">估計血氧 SpO₂</div>
+        <div class="value" id="spo2Value">— <small>%</small></div>
+      </div>
       <div class="cell quality">
         <div class="label">訊號品質</div>
         <div class="dots" id="qualityDots">
@@ -174,7 +179,7 @@
   </div>
 
   <p class="disclaimer">
-    這是驗證「網頁相機能否讀到可用 PPG 訊號」的技術 demo，量測方式為手指蓋住鏡頭＋補光燈，並非醫療器材，估算結果未經臨床驗證，僅供開發測試參考，請勿用於任何醫療判斷。
+    這是驗證「網頁相機能否讀到可用 PPG 訊號」的技術 demo，量測方式為手指蓋住鏡頭＋補光燈，並非醫療器材。心率與血氧數值皆未經臨床驗證，僅供開發測試參考，請勿用於任何醫療判斷。血氧估算尤其粗略：一般血氧機靠紅光＋紅外線兩種波長比對吸收率，手機相機沒有紅外線 LED，這裡是用紅色與藍色通道的比值做替代近似，準確度遠低於真正的血氧機，數字僅供觀察相對趨勢，不代表實際血氧濃度。
   </p>
 </div>
 
@@ -183,6 +188,7 @@
   const goBtn = document.getElementById('go');
   const statusEl = document.getElementById('status');
   const bpmEl = document.getElementById('bpmValue');
+  const spo2El = document.getElementById('spo2Value');
   const timeEl = document.getElementById('timeValue');
   const torchTag = document.getElementById('torchTag');
   const dots = [...document.querySelectorAll('.dot')];
@@ -201,7 +207,7 @@
   let track = null;
   let rafId = null;
   let running = false;
-  let samples = []; // {t, v}
+  let samples = []; // {t, v, r, g, b} — v mirrors r, kept for the trace/BPM code
   let startTime = 0;
   let displayBuffer = []; // for live trace rendering
 
@@ -273,13 +279,15 @@
     if (video.readyState >= 2) {
       sampleCtx.drawImage(video, 0, 0, SAMPLE_CANVAS_SIZE, SAMPLE_CANVAS_SIZE);
       const frame = sampleCtx.getImageData(0, 0, SAMPLE_CANVAS_SIZE, SAMPLE_CANVAS_SIZE).data;
-      let rSum = 0, count = 0;
+      let rSum = 0, gSum = 0, bSum = 0, count = 0;
       for (let i = 0; i < frame.length; i += 4) {
-        rSum += frame[i]; // red channel — dominant PPG signal under finger+flash
+        rSum += frame[i];
+        gSum += frame[i + 1];
+        bSum += frame[i + 2];
         count++;
       }
-      const rAvg = rSum / count;
-      samples.push({ t: elapsed, v: rAvg });
+      const rAvg = rSum / count, gAvg = gSum / count, bAvg = bSum / count;
+      samples.push({ t: elapsed, v: rAvg, r: rAvg, g: gAvg, b: bAvg });
 
       displayBuffer.push({ t: elapsed, v: rAvg });
       if (displayBuffer.length > 150) displayBuffer.shift();
@@ -359,6 +367,44 @@
     return { bpm: (bpm >= 40 && bpm <= 200) ? bpm : null, quality };
   }
 
+  function estimateSpO2(samples) {
+    // Camera-based approximation only: real oximeters compare red vs infrared
+    // absorption; phone cameras have no IR LED, so this substitutes the blue
+    // channel for infrared (a known but much less accurate proxy in the
+    // literature). Treat the output as a rough trend indicator, not a reading.
+    if (samples.length < 30) return { spo2: null, quality: 0 };
+
+    const rVals = samples.map(s => s.r);
+    const bVals = samples.map(s => s.b);
+
+    const dcR = rVals.reduce((s, v) => s + v, 0) / rVals.length;
+    const dcB = bVals.reduce((s, v) => s + v, 0) / bVals.length;
+    if (dcR < 5 || dcB < 5) return { spo2: null, quality: 0 }; // near-black frame, finger likely not covering lens+flash
+
+    const baseWinR = movingAverage(rVals, 5);
+    const baseWinB = movingAverage(bVals, 5);
+    const acR = rVals.map((v, i) => v - baseWinR[i]);
+    const acB = bVals.map((v, i) => v - baseWinB[i]);
+
+    const rmsR = Math.sqrt(acR.reduce((s, v) => s + v * v, 0) / acR.length);
+    const rmsB = Math.sqrt(acB.reduce((s, v) => s + v * v, 0) / acB.length);
+    if (rmsR < 0.05) return { spo2: null, quality: 0 }; // effectively no pulsatile signal
+
+    const ratio = (rmsR / dcR) / (rmsB / dcB);
+    // Commonly cited empirical mapping from the camera-PPG literature.
+    // Not calibrated against a real oximeter — treat as illustrative.
+    let spo2 = Math.round(110 - 25 * ratio);
+    spo2 = Math.max(70, Math.min(100, spo2));
+
+    // Quality proxy: how strong the blue-channel pulsatile signal is relative
+    // to noise. Weak blue AC (common — blue is the noisiest channel on most
+    // phone sensors) means the ratio is unreliable even if red looks clean.
+    const blueSnr = rmsB / dcB;
+    let quality = blueSnr > 0.004 ? 3 : (blueSnr > 0.0015 ? 2 : 1);
+
+    return { spo2, quality };
+  }
+
   function renderQuality(q) {
     dots.forEach((d, i) => d.classList.toggle('on', i < q));
   }
@@ -369,7 +415,10 @@
     timeEl.innerHTML = '0<small>s</small>';
 
     const { bpm, quality } = estimateBPM();
+    const { spo2, quality: spo2Quality } = estimateSpO2(samples);
     renderQuality(quality);
+
+    spo2El.innerHTML = spo2 !== null ? spo2 + ' <small>%</small>' : '— <small>%</small>';
 
     if (bpm) {
       bpmEl.innerHTML = bpm + ' <small>bpm</small>';
@@ -383,6 +432,10 @@
       setStatus('這次沒有偵測到清楚的脈搏訊號。確認手指完全蓋住鏡頭與閃光燈，並保持靜止後再試一次。', 'alert');
     }
 
+    if (spo2 !== null && spo2Quality <= 1) {
+      statusEl.textContent += '　（血氧訊號較弱，數字僅供參考，準確度低。）';
+    }
+
     goBtn.disabled = false;
     goBtn.textContent = '重新測量（20 秒）';
   }
@@ -391,6 +444,7 @@
     samples = [];
     displayBuffer = [];
     bpmEl.innerHTML = '— <small>bpm</small>';
+    spo2El.innerHTML = '— <small>%</small>';
     renderQuality(0);
     goBtn.disabled = true;
     torchTag.textContent = 'TORCH: —';
