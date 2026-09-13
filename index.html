@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>HealthWatcher Web · 心率訊號測試</title>
+<style>
+  :root{
+    --bg:#0a1512;
+    --panel:#0f1e1a;
+    --panel-border:#1e3830;
+    --trace:#4ce0a0;
+    --trace-dim:#245240;
+    --amber:#ffb454;
+    --alert:#ff6b57;
+    --text:#e7f3ee;
+    --text-dim:#7c9a8f;
+    --mono: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+    --sans: 'Inter', -apple-system, 'PingFang TC', 'Noto Sans TC', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; min-height:100%;
+    background:
+      radial-gradient(ellipse at 50% -10%, #12261f 0%, var(--bg) 55%);
+    color:var(--text);
+    font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+  }
+  body{
+    display:flex; justify-content:center;
+    padding:28px 16px 60px;
+  }
+  .rig{
+    width:100%; max-width:480px;
+  }
+  .brand{
+    display:flex; align-items:baseline; justify-content:space-between;
+    margin-bottom:18px;
+  }
+  .brand h1{
+    font-size:15px; font-weight:600; letter-spacing:0.02em; margin:0;
+    color:var(--text);
+  }
+  .brand span{
+    font-family:var(--mono); font-size:11px; color:var(--text-dim);
+  }
+  .monitor{
+    background:linear-gradient(180deg, var(--panel), #0c1815);
+    border:1px solid var(--panel-border);
+    border-radius:6px;
+    padding:18px 18px 22px;
+    box-shadow: 0 0 0 1px rgba(76,224,160,0.03), 0 20px 50px -20px rgba(0,0,0,0.6);
+  }
+  .trace-wrap{
+    position:relative;
+    border:1px solid var(--panel-border);
+    border-radius:4px;
+    background:
+      linear-gradient(rgba(76,224,160,0.05) 1px, transparent 1px) 0 0 / 100% 25%,
+      #071310;
+    height:150px;
+    overflow:hidden;
+  }
+  canvas#trace{ width:100%; height:100%; display:block; }
+  .trace-label{
+    position:absolute; top:8px; left:10px;
+    font-family:var(--mono); font-size:10px; color:var(--text-dim);
+    letter-spacing:0.04em;
+  }
+  .readouts{
+    display:grid; grid-template-columns:1.3fr 1fr 1fr;
+    gap:1px; background:var(--panel-border);
+    margin-top:14px; border:1px solid var(--panel-border); border-radius:4px;
+    overflow:hidden;
+  }
+  .cell{ background:var(--panel); padding:12px 14px; }
+  .cell .label{ font-size:10px; color:var(--text-dim); letter-spacing:0.03em; margin-bottom:6px;}
+  .cell .value{ font-family:var(--mono); font-size:26px; line-height:1; color:var(--trace); }
+  .cell .value small{ font-size:13px; color:var(--text-dim); margin-left:4px; }
+  .cell.quality .dots{ display:flex; gap:4px; margin-top:2px; }
+  .dot{ width:9px; height:9px; border-radius:50%; background:var(--panel-border); }
+  .dot.on{ background:var(--trace); }
+  .cell.quality .value{ font-size:16px; color:var(--text); }
+
+  .controls{ margin-top:16px; display:flex; gap:10px; align-items:center; }
+  button#go{
+    flex:1; background:var(--trace); color:#04140d; border:none;
+    font-family:var(--sans); font-weight:600; font-size:14px;
+    padding:13px 16px; border-radius:4px; cursor:pointer;
+    transition:transform .12s ease, background .12s ease;
+  }
+  button#go:hover{ background:#63e8ae; }
+  button#go:active{ transform:scale(0.98); }
+  button#go:disabled{ background:var(--panel-border); color:var(--text-dim); cursor:not-allowed; }
+  button#go:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+
+  .torch-tag{
+    font-family:var(--mono); font-size:10px; color:var(--text-dim);
+    border:1px solid var(--panel-border); border-radius:3px; padding:6px 8px;
+    white-space:nowrap;
+  }
+  .torch-tag.active{ color:var(--amber); border-color:var(--amber); }
+
+  .status{
+    margin-top:14px; font-size:13px; color:var(--text-dim); min-height:36px; line-height:1.5;
+  }
+  .status.alert{ color:var(--alert); }
+  .status.good{ color:var(--trace); }
+
+  .preview{
+    margin-top:14px; display:flex; gap:10px; align-items:center;
+  }
+  .preview video{
+    width:52px; height:52px; object-fit:cover; border-radius:4px;
+    border:1px solid var(--panel-border); background:#000;
+  }
+  .preview p{
+    margin:0; font-size:12px; color:var(--text-dim); line-height:1.5;
+  }
+
+  .disclaimer{
+    margin-top:22px; font-size:11px; color:var(--text-dim); line-height:1.6;
+    border-top:1px solid var(--panel-border); padding-top:14px;
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    button#go{ transition:none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="rig">
+  <div class="brand">
+    <h1>HealthWatcher · Web</h1>
+    <span>PPG SIGNAL TEST</span>
+  </div>
+
+  <div class="monitor">
+    <div class="trace-wrap">
+      <span class="trace-label">RAW SIGNAL</span>
+      <canvas id="trace"></canvas>
+    </div>
+
+    <div class="readouts">
+      <div class="cell">
+        <div class="label">估計心率</div>
+        <div class="value" id="bpmValue">— <small>bpm</small></div>
+      </div>
+      <div class="cell quality">
+        <div class="label">訊號品質</div>
+        <div class="dots" id="qualityDots">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        </div>
+      </div>
+      <div class="cell">
+        <div class="label">剩餘時間</div>
+        <div class="value" id="timeValue">20<small>s</small></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="go">開始測量（20 秒）</button>
+      <span class="torch-tag" id="torchTag">TORCH: —</span>
+    </div>
+
+    <div class="preview">
+      <video id="cam" autoplay playsinline muted></video>
+      <p>用食指指腹完全蓋住鏡頭與閃光燈，輕觸即可，不要用力壓。過程中盡量保持不動。</p>
+    </div>
+
+    <div class="status" id="status" aria-live="polite">準備就緒。按下開始，接著用手指蓋住相機鏡頭。</div>
+  </div>
+
+  <p class="disclaimer">
+    這是驗證「網頁相機能否讀到可用 PPG 訊號」的技術 demo，量測方式為手指蓋住鏡頭＋補光燈，並非醫療器材，估算結果未經臨床驗證，僅供開發測試參考，請勿用於任何醫療判斷。
+  </p>
+</div>
+
+<script>
+(() => {
+  const goBtn = document.getElementById('go');
+  const statusEl = document.getElementById('status');
+  const bpmEl = document.getElementById('bpmValue');
+  const timeEl = document.getElementById('timeValue');
+  const torchTag = document.getElementById('torchTag');
+  const dots = [...document.querySelectorAll('.dot')];
+  const video = document.getElementById('cam');
+  const traceCanvas = document.getElementById('trace');
+  const traceCtx = traceCanvas.getContext('2d');
+
+  const DURATION_MS = 20000;
+  const SAMPLE_CANVAS_SIZE = 32;
+  const sampleCanvas = document.createElement('canvas');
+  sampleCanvas.width = SAMPLE_CANVAS_SIZE;
+  sampleCanvas.height = SAMPLE_CANVAS_SIZE;
+  const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+
+  let stream = null;
+  let track = null;
+  let rafId = null;
+  let running = false;
+  let samples = []; // {t, v}
+  let startTime = 0;
+  let displayBuffer = []; // for live trace rendering
+
+  function setStatus(msg, mode) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status' + (mode ? ' ' + mode : '');
+  }
+
+  function resizeTraceCanvas() {
+    const rect = traceCanvas.getBoundingClientRect();
+    traceCanvas.width = rect.width * devicePixelRatio;
+    traceCanvas.height = rect.height * devicePixelRatio;
+  }
+  window.addEventListener('resize', resizeTraceCanvas);
+
+  function drawTrace() {
+    resizeTraceCanvas();
+    const w = traceCanvas.width, h = traceCanvas.height;
+    traceCtx.clearRect(0, 0, w, h);
+    if (displayBuffer.length < 2) return;
+
+    const n = displayBuffer.length;
+    const values = displayBuffer.map(p => p.v);
+    const min = Math.min(...values), max = Math.max(...values);
+    const range = (max - min) || 1;
+
+    traceCtx.beginPath();
+    traceCtx.lineWidth = 1.6 * devicePixelRatio;
+    traceCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--trace').trim();
+    traceCtx.lineJoin = 'round';
+
+    displayBuffer.forEach((p, i) => {
+      const x = (i / (n - 1)) * w;
+      const norm = (p.v - min) / range;
+      const y = h - norm * h * 0.8 - h * 0.1;
+      if (i === 0) traceCtx.moveTo(x, y);
+      else traceCtx.lineTo(x, y);
+    });
+    traceCtx.stroke();
+  }
+
+  async function tryEnableTorch(mediaTrack) {
+    try {
+      const caps = mediaTrack.getCapabilities ? mediaTrack.getCapabilities() : {};
+      if (caps.torch) {
+        await mediaTrack.applyConstraints({ advanced: [{ torch: true }] });
+        torchTag.textContent = 'TORCH: ON';
+        torchTag.classList.add('active');
+        return true;
+      }
+    } catch (e) {
+      // ignore, fall through
+    }
+    torchTag.textContent = 'TORCH: N/A';
+    return false;
+  }
+
+  function stopStream() {
+    if (rafId) cancelAnimationFrame(rafId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; track = null;
+  }
+
+  function captureLoop() {
+    if (!running) return;
+    const now = performance.now();
+    const elapsed = now - startTime;
+
+    if (video.readyState >= 2) {
+      sampleCtx.drawImage(video, 0, 0, SAMPLE_CANVAS_SIZE, SAMPLE_CANVAS_SIZE);
+      const frame = sampleCtx.getImageData(0, 0, SAMPLE_CANVAS_SIZE, SAMPLE_CANVAS_SIZE).data;
+      let rSum = 0, count = 0;
+      for (let i = 0; i < frame.length; i += 4) {
+        rSum += frame[i]; // red channel — dominant PPG signal under finger+flash
+        count++;
+      }
+      const rAvg = rSum / count;
+      samples.push({ t: elapsed, v: rAvg });
+
+      displayBuffer.push({ t: elapsed, v: rAvg });
+      if (displayBuffer.length > 150) displayBuffer.shift();
+      drawTrace();
+    }
+
+    const remain = Math.max(0, DURATION_MS - elapsed);
+    timeEl.innerHTML = Math.ceil(remain / 1000) + '<small>s</small>';
+
+    if (elapsed >= DURATION_MS) {
+      finishMeasurement();
+      return;
+    }
+    rafId = requestAnimationFrame(captureLoop);
+  }
+
+  function movingAverage(arr, windowSize) {
+    const out = new Array(arr.length).fill(0);
+    for (let i = 0; i < arr.length; i++) {
+      let lo = Math.max(0, i - windowSize), hi = Math.min(arr.length - 1, i + windowSize);
+      let sum = 0, c = 0;
+      for (let j = lo; j <= hi; j++) { sum += arr[j]; c++; }
+      out[i] = sum / c;
+    }
+    return out;
+  }
+
+  function estimateBPM() {
+    if (samples.length < 30) return { bpm: null, quality: 0 };
+
+    const values = samples.map(s => s.v);
+    const times = samples.map(s => s.t / 1000); // seconds
+
+    // detrend: subtract slow-moving baseline (~1s window)
+    const avgIntervalMs = (times[times.length - 1] - times[0]) / times.length * 1000;
+    const baselineWindow = Math.max(3, Math.round(1000 / avgIntervalMs));
+    const baseline = movingAverage(values, baselineWindow);
+    const detrended = values.map((v, i) => v - baseline[i]);
+
+    // light smoothing to suppress camera noise
+    const smoothed = movingAverage(detrended, 1);
+
+    // amplitude-based quality signal
+    const std = Math.sqrt(smoothed.reduce((s, v) => s + v * v, 0) / smoothed.length);
+
+    // peak picking with refractory period (min 0.33s apart -> max 180bpm)
+    const minDistSec = 0.33;
+    const peakTimes = [];
+    let lastPeakTime = -Infinity;
+    const threshold = std * 0.35;
+
+    for (let i = 1; i < smoothed.length - 1; i++) {
+      const v = smoothed[i];
+      if (v > threshold && v > smoothed[i - 1] && v >= smoothed[i + 1]) {
+        if (times[i] - lastPeakTime >= minDistSec) {
+          peakTimes.push(times[i]);
+          lastPeakTime = times[i];
+        }
+      }
+    }
+
+    if (peakTimes.length < 4) return { bpm: null, quality: 1 };
+
+    const intervals = [];
+    for (let i = 1; i < peakTimes.length; i++) intervals.push(peakTimes[i] - peakTimes[i - 1]);
+
+    intervals.sort((a, b) => a - b);
+    const median = intervals[Math.floor(intervals.length / 2)];
+    const meanAbsDev = intervals.reduce((s, v) => s + Math.abs(v - median), 0) / intervals.length;
+    const regularity = 1 - Math.min(1, meanAbsDev / median); // 0..1, higher = more regular
+
+    const bpm = Math.round(60 / median);
+    let quality = Math.round(regularity * 5);
+    if (bpm < 40 || bpm > 200) quality = Math.min(quality, 1);
+    quality = Math.max(0, Math.min(5, quality));
+
+    return { bpm: (bpm >= 40 && bpm <= 200) ? bpm : null, quality };
+  }
+
+  function renderQuality(q) {
+    dots.forEach((d, i) => d.classList.toggle('on', i < q));
+  }
+
+  function finishMeasurement() {
+    running = false;
+    stopStream();
+    timeEl.innerHTML = '0<small>s</small>';
+
+    const { bpm, quality } = estimateBPM();
+    renderQuality(quality);
+
+    if (bpm) {
+      bpmEl.innerHTML = bpm + ' <small>bpm</small>';
+      if (quality >= 3) {
+        setStatus('偵測到穩定訊號。再測一次可比對數值是否一致。', 'good');
+      } else {
+        setStatus('抓到心跳，但訊號不太規律——試著把手指壓得更服貼、更不要移動。', 'alert');
+      }
+    } else {
+      bpmEl.innerHTML = '— <small>bpm</small>';
+      setStatus('這次沒有偵測到清楚的脈搏訊號。確認手指完全蓋住鏡頭與閃光燈，並保持靜止後再試一次。', 'alert');
+    }
+
+    goBtn.disabled = false;
+    goBtn.textContent = '重新測量（20 秒）';
+  }
+
+  async function startMeasurement() {
+    samples = [];
+    displayBuffer = [];
+    bpmEl.innerHTML = '— <small>bpm</small>';
+    renderQuality(0);
+    goBtn.disabled = true;
+    torchTag.textContent = 'TORCH: —';
+    torchTag.classList.remove('active');
+    setStatus('啟動相機中…');
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 320 }, height: { ideal: 240 } },
+        audio: false
+      });
+    } catch (err) {
+      setStatus('無法取得相機權限：' + err.message + '（請確認以 HTTPS 開啟，並允許相機權限）', 'alert');
+      goBtn.disabled = false;
+      return;
+    }
+
+    video.srcObject = stream;
+    track = stream.getVideoTracks()[0];
+    await tryEnableTorch(track);
+
+    setStatus('用手指完全蓋住鏡頭與閃光燈，保持不動，量測中…', 'good');
+    running = true;
+    startTime = performance.now();
+    rafId = requestAnimationFrame(captureLoop);
+  }
+
+  goBtn.addEventListener('click', () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('此瀏覽器不支援相機存取（getUserMedia）。', 'alert');
+      return;
+    }
+    startMeasurement();
+  });
+
+  resizeTraceCanvas();
+})();
+</script>
+
+</body>
+</html>
